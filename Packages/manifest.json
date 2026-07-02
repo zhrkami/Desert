@@ -1,7 +1,12 @@
 {
   "dependencies": {
+    "com.coplaydev.unity-mcp": "file:C:/Users/33428/Desktop/小学期项目/unity-mcp-beta/MCPForUnity",
     "com.unity.collab-proxy": "2.12.4",
     "com.unity.feature.development": "1.0.1",
+    "com.unity.ide.rider": "3.0.36",
+    "com.unity.ide.visualstudio": "2.0.22",
+    "com.unity.ide.vscode": "1.2.5",
+    "com.unity.test-framework": "1.1.33",
     "com.unity.textmeshpro": "3.0.7",
     "com.unity.timeline": "1.7.7",
     "com.unity.ugui": "1.0.0",
