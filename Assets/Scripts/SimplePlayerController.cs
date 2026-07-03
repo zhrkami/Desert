@@ -1,10 +1,17 @@
 using UnityEngine;
+using UnityEngine.Rendering;
 
 [RequireComponent(typeof(Rigidbody))]
 [RequireComponent(typeof(CapsuleCollider))]
 public class SimplePlayerController : MonoBehaviour
 {
     [SerializeField] private Transform cameraTransform;
+    [SerializeField] private bool firstPersonView = true;
+    [SerializeField] private Vector3 firstPersonCameraLocalPosition = new Vector3(0f, 1.65f, 0f);
+    [SerializeField] private Transform firstPersonVisualRoot;
+    [SerializeField]
+    [Range(0f, 1f)]
+    private float firstPersonBodyAlpha = 0f;
     [SerializeField] private float moveSpeed = 6f;
     [SerializeField] private float jumpVelocity = 6.5f;
     [SerializeField] private float playerMass = 160f;
@@ -27,6 +34,7 @@ public class SimplePlayerController : MonoBehaviour
     private Vector3 steepContactNormal;
     private bool jumpRequested;
     private bool controlEnabled;
+    private Renderer[] firstPersonRenderers;
 
     public Transform CameraTransform
     {
@@ -65,6 +73,7 @@ public class SimplePlayerController : MonoBehaviour
         capsuleCollider = GetComponent<CapsuleCollider>();
         ConfigureRigidbody();
         ConfigureCollider();
+        ApplyFirstPersonView();
         yaw = transform.eulerAngles.y;
         if (cameraTransform != null)
         {
@@ -190,6 +199,8 @@ public class SimplePlayerController : MonoBehaviour
             ConfigureCollider();
         }
 
+        ApplyFirstPersonView();
+
         Cursor.lockState = enabled ? CursorLockMode.Locked : CursorLockMode.None;
         Cursor.visible = !enabled;
 
@@ -202,6 +213,43 @@ public class SimplePlayerController : MonoBehaviour
         if (!enabled)
         {
             jumpRequested = false;
+        }
+    }
+
+    public void ResetToPose(Vector3 worldPosition, Quaternion worldRotation, Quaternion cameraLocalRotation)
+    {
+        if (body == null)
+        {
+            body = GetComponent<Rigidbody>();
+        }
+
+        if (capsuleCollider == null)
+        {
+            capsuleCollider = GetComponent<CapsuleCollider>();
+        }
+
+        yaw = worldRotation.eulerAngles.y;
+        pitch = NormalizeAngle(cameraLocalRotation.eulerAngles.x);
+        jumpRequested = false;
+        lastGroundedTime = -100f;
+        lastSteepContactTime = -100f;
+        steepContactNormal = Vector3.zero;
+
+        Quaternion yawRotation = Quaternion.Euler(0f, yaw, 0f);
+        transform.SetPositionAndRotation(worldPosition, yawRotation);
+
+        if (body != null)
+        {
+            body.position = worldPosition;
+            body.rotation = yawRotation;
+            body.velocity = Vector3.zero;
+            body.angularVelocity = Vector3.zero;
+            body.Sleep();
+        }
+
+        if (cameraTransform != null)
+        {
+            cameraTransform.localRotation = Quaternion.Euler(pitch, 0f, 0f);
         }
     }
 
@@ -231,6 +279,154 @@ public class SimplePlayerController : MonoBehaviour
 
         ConfigureFrictionlessMaterial(playerPhysicsMaterial);
         capsuleCollider.sharedMaterial = playerPhysicsMaterial;
+    }
+
+    private void ApplyFirstPersonView()
+    {
+        if (!firstPersonView)
+        {
+            return;
+        }
+
+        ConfigureFirstPersonCamera();
+        ApplyFirstPersonBodyTransparency();
+    }
+
+    private void ConfigureFirstPersonCamera()
+    {
+        if (cameraTransform == null)
+        {
+            return;
+        }
+
+        if (cameraTransform.parent != transform)
+        {
+            cameraTransform.SetParent(transform, false);
+        }
+
+        cameraTransform.localPosition = firstPersonCameraLocalPosition;
+        cameraTransform.localRotation = Quaternion.identity;
+    }
+
+    private void ApplyFirstPersonBodyTransparency()
+    {
+        Renderer[] renderers = GetFirstPersonRenderers();
+        if (renderers == null)
+        {
+            return;
+        }
+
+        float alpha = Mathf.Clamp01(firstPersonBodyAlpha);
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            Renderer rendererToUpdate = renderers[i];
+            if (rendererToUpdate == null || (cameraTransform != null && rendererToUpdate.transform.IsChildOf(cameraTransform)))
+            {
+                continue;
+            }
+
+            if (alpha <= 0.01f)
+            {
+                rendererToUpdate.enabled = false;
+                continue;
+            }
+
+            rendererToUpdate.enabled = true;
+            rendererToUpdate.shadowCastingMode = ShadowCastingMode.Off;
+            ApplyRendererAlpha(rendererToUpdate, alpha);
+        }
+    }
+
+    private Renderer[] GetFirstPersonRenderers()
+    {
+        if (firstPersonRenderers != null && firstPersonRenderers.Length > 0)
+        {
+            return firstPersonRenderers;
+        }
+
+        if (firstPersonVisualRoot == null)
+        {
+            firstPersonVisualRoot = FindFirstPersonVisualRoot();
+        }
+
+        if (firstPersonVisualRoot == null)
+        {
+            return null;
+        }
+
+        firstPersonRenderers = firstPersonVisualRoot.GetComponentsInChildren<Renderer>(true);
+        return firstPersonRenderers;
+    }
+
+    private Transform FindFirstPersonVisualRoot()
+    {
+        Transform namedBody = transform.Find("Player_Body");
+        if (namedBody != null)
+        {
+            return namedBody;
+        }
+
+        Renderer[] renderers = GetComponentsInChildren<Renderer>(true);
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            Renderer rendererToCheck = renderers[i];
+            if (rendererToCheck != null && (cameraTransform == null || !rendererToCheck.transform.IsChildOf(cameraTransform)))
+            {
+                return rendererToCheck.transform;
+            }
+        }
+
+        return null;
+    }
+
+    private static void ApplyRendererAlpha(Renderer rendererToUpdate, float alpha)
+    {
+        Material[] materials = rendererToUpdate.materials;
+        for (int i = 0; i < materials.Length; i++)
+        {
+            Material material = materials[i];
+            if (material == null)
+            {
+                continue;
+            }
+
+            if (material.HasProperty("_Color"))
+            {
+                Color color = material.color;
+                color.a = alpha;
+                material.color = color;
+            }
+
+            ConfigureTransparentMaterial(material);
+        }
+    }
+
+    private static void ConfigureTransparentMaterial(Material material)
+    {
+        if (material.HasProperty("_Mode"))
+        {
+            material.SetFloat("_Mode", 3f);
+        }
+
+        if (material.HasProperty("_SrcBlend"))
+        {
+            material.SetInt("_SrcBlend", (int)BlendMode.SrcAlpha);
+        }
+
+        if (material.HasProperty("_DstBlend"))
+        {
+            material.SetInt("_DstBlend", (int)BlendMode.OneMinusSrcAlpha);
+        }
+
+        if (material.HasProperty("_ZWrite"))
+        {
+            material.SetInt("_ZWrite", 0);
+        }
+
+        material.DisableKeyword("_ALPHATEST_ON");
+        material.EnableKeyword("_ALPHABLEND_ON");
+        material.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+        material.renderQueue = (int)RenderQueue.Transparent;
     }
 
     private static void ConfigureFrictionlessMaterial(PhysicMaterial material)

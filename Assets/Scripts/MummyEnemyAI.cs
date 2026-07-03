@@ -13,6 +13,7 @@ public class MummyEnemyAI : MonoBehaviour
     [SerializeField] private Transform visualRoot;
     [SerializeField] private float ghostRiseSpeed = 0.8f;
     [SerializeField] private float attackDistance = 1f;
+    [SerializeField] private float movementDirectionRetargetDelay = 0.5f;
     [SerializeField] private float fallbackPlayerHalfSpeed = 3f;
     [SerializeField] private float fallbackPlayerJumpVelocity = 6.5f;
     [SerializeField] private float playerGravityRatio = 0.5f;
@@ -29,17 +30,24 @@ public class MummyEnemyAI : MonoBehaviour
     [SerializeField] private float capsuleRadius = 0.45f;
     [SerializeField] private Vector3 capsuleCenter = new Vector3(0f, 0.725f, 0f);
     [SerializeField] private float maxGhostDuration = 8f;
+    [SerializeField] private float maxHealth = 80f;
+    [SerializeField] private float attackDamagePerSecond = 10f;
+    [SerializeField] private float deathDestroyDelay = 0.1f;
     [SerializeField] private string flyClipName = "mummy_fly_up_loop";
     [SerializeField] private string walkClipName = "mummy_walk";
     [SerializeField] private string attackClipName = "mummy_attack_repeatedly";
     [SerializeField] private string jumpClipName = "mummy_jump";
     [SerializeField] private string dizzyClipName = "mummy_dizzy";
+    [SerializeField] private string deathClipName = "mummy_die";
     [SerializeField] private MummyState state = MummyState.Ghost;
 
     private Animation animationComponent;
     private CapsuleCollider capsuleCollider;
     private Rigidbody body;
+    private Collider targetCollider;
+    private PlayerHealth playerHealth;
     private PhysicMaterial runtimeFrictionlessMaterial;
+    private float currentHealth;
     private bool hasTouchedBlockingSpace;
     private float ghostStartedAt;
     private Quaternion ghostVisualRotation;
@@ -53,15 +61,20 @@ public class MummyEnemyAI : MonoBehaviour
     private bool pendingDizzyAfterSuperJump;
     private bool superJumpLeftGround;
     private bool isAttacking;
+    private bool isDead;
     private Vector3 movementWindowLastPosition;
     private float movementWindowStartedAt = -1f;
     private float movementWindowDistance;
+    private Vector3 delayedMoveDirection;
+    private float nextMoveDirectionRetargetTime = -1f;
 
     public void Initialize(Transform newTarget, SimplePlayerController newPlayerController, Transform newVisualRoot)
     {
         target = newTarget;
         playerController = newPlayerController;
         visualRoot = newVisualRoot;
+        targetCollider = target != null ? target.GetComponent<Collider>() : null;
+        playerHealth = target != null ? PlayerHealth.GetOrCreate(target.gameObject) : null;
         animationComponent = visualRoot != null ? visualRoot.GetComponent<Animation>() : GetComponentInChildren<Animation>();
         ConfigureAnimationClips();
         EnterGhostState();
@@ -81,6 +94,8 @@ public class MummyEnemyAI : MonoBehaviour
             body = gameObject.AddComponent<Rigidbody>();
         }
 
+        currentHealth = maxHealth;
+
         if (visualRoot == null && transform.childCount > 0)
         {
             visualRoot = transform.GetChild(0);
@@ -89,6 +104,11 @@ public class MummyEnemyAI : MonoBehaviour
         if (animationComponent == null)
         {
             animationComponent = visualRoot != null ? visualRoot.GetComponent<Animation>() : GetComponentInChildren<Animation>();
+        }
+
+        if (targetCollider == null && target != null)
+        {
+            targetCollider = target.GetComponent<Collider>();
         }
 
         ghostVisualRotation = Quaternion.LookRotation(Vector3.up, Vector3.forward);
@@ -104,7 +124,7 @@ public class MummyEnemyAI : MonoBehaviour
 
     private void FixedUpdate()
     {
-        if (target == null)
+        if (isDead || target == null)
         {
             return;
         }
@@ -122,16 +142,31 @@ public class MummyEnemyAI : MonoBehaviour
 
     private void OnCollisionEnter(Collision collision)
     {
+        if (isDead)
+        {
+            return;
+        }
+
         RegisterCollision(collision);
     }
 
     private void OnCollisionStay(Collision collision)
     {
+        if (isDead)
+        {
+            return;
+        }
+
         RegisterCollision(collision);
     }
 
     private void OnCollisionExit(Collision collision)
     {
+        if (isDead)
+        {
+            return;
+        }
+
         if (!IsSameMummy(collision.collider))
         {
             lastBlockingCollisionTime = -100f;
@@ -149,10 +184,14 @@ public class MummyEnemyAI : MonoBehaviour
 
     private void ConfigureGhostPhysics()
     {
+        if (!body.isKinematic)
+        {
+            body.velocity = Vector3.zero;
+            body.angularVelocity = Vector3.zero;
+        }
+
         body.isKinematic = true;
         body.useGravity = false;
-        body.velocity = Vector3.zero;
-        body.angularVelocity = Vector3.zero;
         body.constraints = RigidbodyConstraints.FreezeRotation;
         body.interpolation = RigidbodyInterpolation.Interpolate;
         body.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
@@ -194,12 +233,69 @@ public class MummyEnemyAI : MonoBehaviour
         attackClipName = ResolveClipName(attackClipName, "attack");
         jumpClipName = ResolveClipName(jumpClipName, "jump");
         dizzyClipName = ResolveClipName(dizzyClipName, "dizzy");
+        deathClipName = ResolveClipName(deathClipName, "die");
 
         SetClipWrapMode(flyClipName, WrapMode.Loop);
         SetClipWrapMode(walkClipName, WrapMode.Loop);
         SetClipWrapMode(attackClipName, WrapMode.Loop);
         SetClipWrapMode(jumpClipName, WrapMode.Once);
         SetClipWrapMode(dizzyClipName, WrapMode.Loop);
+        SetClipWrapMode(deathClipName, WrapMode.Once);
+    }
+
+    public void TakeDamage(float damage)
+    {
+        if (isDead || damage <= 0f)
+        {
+            return;
+        }
+
+        currentHealth = Mathf.Max(0f, currentHealth - damage);
+        if (currentHealth <= 0f)
+        {
+            Die();
+        }
+    }
+
+    private void Die()
+    {
+        if (isDead)
+        {
+            return;
+        }
+
+        isDead = true;
+        isAttacking = false;
+        pendingDizzyAfterSuperJump = false;
+        superJumpLeftGround = false;
+        movementPausedUntil = -100f;
+        jumpAnimationUntil = -100f;
+
+        if (body != null)
+        {
+            if (!body.isKinematic)
+            {
+                body.velocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+            }
+
+            body.isKinematic = true;
+            body.useGravity = false;
+        }
+
+        if (capsuleCollider != null)
+        {
+            capsuleCollider.enabled = false;
+        }
+
+        if (visualRoot != null)
+        {
+            visualRoot.localPosition = Vector3.zero;
+            visualRoot.localRotation = Quaternion.identity;
+        }
+
+        PlayDeathAnimation();
+        Destroy(gameObject, GetClipLength(deathClipName, 1f) + deathDestroyDelay);
     }
 
     private void EnterGhostState()
@@ -211,6 +307,7 @@ public class MummyEnemyAI : MonoBehaviour
         superJumpLeftGround = false;
         isAttacking = false;
         ResetMovementWindow();
+        ResetDelayedMoveDirection();
         ConfigureGhostPhysics();
 
         if (visualRoot != null)
@@ -229,6 +326,7 @@ public class MummyEnemyAI : MonoBehaviour
         ScheduleRegularJump();
         isAttacking = false;
         ResetMovementWindow();
+        ResetDelayedMoveDirection();
 
         if (visualRoot != null)
         {
@@ -257,36 +355,38 @@ public class MummyEnemyAI : MonoBehaviour
 
     private void UpdateNormalState()
     {
+        Vector3 toPlayer3D = target.position - body.position;
+        bool shouldAttack = IsInAttackRange(toPlayer3D);
+        isAttacking = shouldAttack;
+
+        if (shouldAttack)
+        {
+            ResetMovementWindow();
+            ResetDelayedMoveDirection();
+            FacePlayer();
+            StopHorizontalMovement();
+            jumpAnimationUntil = -100f;
+            PlayLoop(attackClipName);
+            DealAttackDamage(Time.fixedDeltaTime);
+            return;
+        }
+
         UpdateSuperJumpLanding();
 
         if (Time.time < movementPausedUntil)
         {
             isAttacking = false;
             ResetMovementWindow();
+            ResetDelayedMoveDirection();
             StopHorizontalMovement();
             PlayLoop(dizzyClipName);
             return;
         }
 
-        Vector3 toPlayer3D = target.position - body.position;
+        toPlayer3D = target.position - body.position;
         Vector3 toPlayer = toPlayer3D;
         toPlayer.y = 0f;
         float distance = toPlayer.magnitude;
-        bool shouldAttack = toPlayer3D.magnitude < attackDistance;
-        isAttacking = shouldAttack;
-
-        if (shouldAttack)
-        {
-            ResetMovementWindow();
-            FacePlayer();
-            StopHorizontalMovement();
-            if (Time.time >= jumpAnimationUntil)
-            {
-                PlayLoop(attackClipName);
-            }
-
-            return;
-        }
 
         if (TrySlowMovementSuperJump())
         {
@@ -297,7 +397,7 @@ public class MummyEnemyAI : MonoBehaviour
 
         if (distance > 0.01f)
         {
-            Vector3 direction = toPlayer / distance;
+            Vector3 direction = GetDelayedMoveDirection(toPlayer, distance);
             Quaternion targetRotation = Quaternion.LookRotation(direction, Vector3.up);
             body.MoveRotation(Quaternion.Slerp(body.rotation, targetRotation, 10f * Time.fixedDeltaTime));
 
@@ -306,6 +406,11 @@ public class MummyEnemyAI : MonoBehaviour
             velocity.x = direction.x * moveSpeed;
             velocity.z = direction.z * moveSpeed;
             body.velocity = velocity;
+        }
+        else
+        {
+            ResetDelayedMoveDirection();
+            StopHorizontalMovement();
         }
 
         if (Time.time >= jumpAnimationUntil)
@@ -356,6 +461,7 @@ public class MummyEnemyAI : MonoBehaviour
         }
 
         ResetMovementWindow();
+        ResetDelayedMoveDirection();
     }
 
     private float CalculateJumpVelocity(float playerHeightMultiplier)
@@ -392,6 +498,7 @@ public class MummyEnemyAI : MonoBehaviour
         StopHorizontalMovement();
         ScheduleRegularJump();
         ResetMovementWindow();
+        ResetDelayedMoveDirection();
         PlayLoop(dizzyClipName);
     }
 
@@ -457,6 +564,28 @@ public class MummyEnemyAI : MonoBehaviour
         }
 
         return Vector3.Distance(target.position, body.position) >= attackDistance;
+    }
+
+    private bool IsInAttackRange(Vector3 targetOffset)
+    {
+        float range = Mathf.Max(0.01f, attackDistance);
+        if (targetOffset.magnitude <= range)
+        {
+            return true;
+        }
+
+        if (targetCollider == null && target != null)
+        {
+            targetCollider = target.GetComponent<Collider>();
+        }
+
+        if (targetCollider == null)
+        {
+            return false;
+        }
+
+        Vector3 closestPlayerPoint = targetCollider.ClosestPoint(body.position);
+        return Vector3.Distance(body.position, closestPlayerPoint) <= range;
     }
 
     private bool TrySlowMovementSuperJump()
@@ -550,12 +679,53 @@ public class MummyEnemyAI : MonoBehaviour
         return Time.time - lastGroundedTime <= 0.15f;
     }
 
+    private Vector3 GetDelayedMoveDirection(Vector3 currentFlatOffset, float distance)
+    {
+        if (distance <= 0.01f)
+        {
+            return Vector3.zero;
+        }
+
+        Vector3 currentDirection = currentFlatOffset / distance;
+        if (delayedMoveDirection.sqrMagnitude <= 0.001f || Time.time >= nextMoveDirectionRetargetTime)
+        {
+            delayedMoveDirection = currentDirection;
+            nextMoveDirectionRetargetTime = Time.time + Mathf.Max(0f, movementDirectionRetargetDelay);
+        }
+
+        return delayedMoveDirection;
+    }
+
+    private void ResetDelayedMoveDirection()
+    {
+        delayedMoveDirection = Vector3.zero;
+        nextMoveDirectionRetargetTime = -1f;
+    }
+
     private void StopHorizontalMovement()
     {
         Vector3 velocity = body.velocity;
         velocity.x = 0f;
         velocity.z = 0f;
         body.velocity = velocity;
+    }
+
+    private void DealAttackDamage(float deltaTime)
+    {
+        if (attackDamagePerSecond <= 0f || target == null)
+        {
+            return;
+        }
+
+        if (playerHealth == null)
+        {
+            playerHealth = PlayerHealth.GetOrCreate(target.gameObject);
+        }
+
+        if (playerHealth != null)
+        {
+            playerHealth.ApplyDamage(attackDamagePerSecond * deltaTime);
+        }
     }
 
     private void FacePlayer()
@@ -592,6 +762,17 @@ public class MummyEnemyAI : MonoBehaviour
 
         animationComponent[clipName].time = 0f;
         animationComponent.CrossFade(clipName, 0.08f);
+    }
+
+    private void PlayDeathAnimation()
+    {
+        if (animationComponent == null || animationComponent[deathClipName] == null)
+        {
+            return;
+        }
+
+        animationComponent[deathClipName].time = 0f;
+        animationComponent.CrossFade(deathClipName, 0.08f);
     }
 
     private float GetClipLength(string clipName, float fallbackLength)

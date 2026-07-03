@@ -5,9 +5,9 @@ public class MummySpawner : MonoBehaviour
     [SerializeField] private Transform player;
     [SerializeField] private SimplePlayerController playerController;
     [SerializeField] private GameObject mummyPrefab;
-    [SerializeField] private float spawnInterval = 6f;
-    [SerializeField] private float minSpawnDistance = 28f;
-    [SerializeField] private float maxSpawnDistance = 31f;
+    [SerializeField] private float spawnInterval = 4f;
+    [SerializeField] private float minSpawnDistance = 16.8f;
+    [SerializeField] private float maxSpawnDistance = 18.6f;
     [SerializeField] private float spawnWorldY = -4f;
     [SerializeField] private bool waitForPlayerControl = true;
 
@@ -31,6 +31,11 @@ public class MummySpawner : MonoBehaviour
     }
 
     private void Start()
+    {
+        ResetSpawnTimer();
+    }
+
+    public void ResetSpawnTimer()
     {
         nextSpawnTime = Time.time + spawnInterval;
     }
